@@ -37,6 +37,21 @@ ldd "$binario" | awk '
   echo "   $lib"
 done
 
+echo ">> Incluindo módulo virtio_blk (pra ter /dev/vda e persistência)"
+# Mesma versão do kernel que o iniciar.sh boota (o mais novo em /boot).
+kv="$(ls -1 /boot/vmlinuz-* | sort -V | tail -n1 | sed 's#.*/vmlinuz-##')"
+mod="/lib/modules/$kv/kernel/drivers/block/virtio_blk.ko"
+mkdir -p "$fs/lib/modules"
+if [[ -f "$mod" ]]; then
+  cp "$mod" "$fs/lib/modules/virtio_blk.ko"
+elif [[ -f "$mod.xz" ]]; then
+  xz -dc "$mod.xz" > "$fs/lib/modules/virtio_blk.ko"
+elif [[ -f "$mod.zst" ]]; then
+  zstd -dc "$mod.zst" > "$fs/lib/modules/virtio_blk.ko"
+else
+  echo "   AVISO: virtio_blk.ko não encontrado; persistência ficará off"
+fi
+
 echo ">> Empacotando initramfs (cpio + gzip)"
 ( cd "$fs" && find . -print0 | cpio --null -o --format=newc 2>/dev/null ) \
   | gzip -9 > "$imagem"

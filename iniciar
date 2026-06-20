@@ -31,21 +31,11 @@ echo
 disco="$raiz/build/disco.img"
 [[ -f "$disco" ]] || { mkdir -p "$raiz/build"; truncate -s 1M "$disco"; }
 
-# KVM corta o boot de ~10s pra ~2s. Cai pra TCG se não houver /dev/kvm.
-acel=()
-if [[ -r /dev/kvm && -w /dev/kvm ]]; then
-  acel=(-enable-kvm -cpu host)
-else
-  echo ">> /dev/kvm indisponível — usando TCG (mais lento)"
-fi
-
 exec qemu-system-x86_64 \
   -kernel "$kernel" \
   -initrd "$imagem" \
   -append "console=ttyS0 quiet loglevel=0 sysctl.debug.exception-trace=0 panic=-1" \
   -m 512M \
-  "${acel[@]}" \
-  -nic none \
   -drive "file=$disco,format=raw,if=virtio" \
   -nographic \
   -no-reboot

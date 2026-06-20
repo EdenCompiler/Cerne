@@ -63,6 +63,11 @@ make rodar
 Isso compila o binário, monta o `initramfs` e liga a máquina no QEMU.
 Para desligar: digite `(desligar)` no REPL, ou `Ctrl-A` seguido de `X`.
 
+**Velocidade:** com KVM (`/dev/kvm`), o boot até o REPL leva **~1.6s**.
+Os scripts usam KVM automaticamente quando disponível e caem pra emulação
+(TCG, ~10s) quando não há. A rede é desligada (`-nic none`) porque o núcleo
+não precisa dela.
+
 Alvos separados:
 
 ```sh
@@ -83,6 +88,7 @@ Tudo é Lisp — os "comandos" são só funções:
 | `(ajuda)`      | lista os comandos                  |
 | `(memoria)`    | uso de memória do núcleo           |
 | `(tempo)`      | tempo de vida do REPL              |
+| `(cronometrar forma...)` | mede o tempo de avaliar formas |
 | `(reiniciar)`  | reinicia a máquina                 |
 | `(desligar)`   | desliga a máquina                  |
 
@@ -94,6 +100,16 @@ Tudo é Lisp — os "comandos" são só funções:
 | `(meminfo)`  | RAM total / livre / disponível     |
 | `(cpuinfo)`  | modelo da CPU e nº de núcleos      |
 | `(data)`     | data e hora em UTC (RTC)           |
+| `(uname)`    | versão do kernel                   |
+| `(cmdline)`  | argumentos de boot do kernel       |
+| `(modulos)`  | módulos do kernel carregados       |
+
+**Arquivos** (explore os pseudo-FS do kernel)
+
+| Comando                  | O que faz                    |
+| ------------------------ | ---------------------------- |
+| `(arquivos "/proc")`     | lista um diretório (ls)      |
+| `(ver "/proc/cmdline")`  | mostra um arquivo (cat)      |
 
 **Memória chave-valor** (vive enquanto a máquina viver)
 
@@ -104,15 +120,37 @@ Tudo é Lisp — os "comandos" são só funções:
 | `(esquecer chave)`         | apaga um valor             |
 | `(tudo-que-lembro)`        | lista tudo                 |
 
+**Persistência em disco cru** — sem sistema de arquivos!
+
+| Comando        | O que faz                                        |
+| -------------- | ------------------------------------------------ |
+| `(salvar)`       | grava a loja direto nos bytes de `/dev/vda`    |
+| `(restaurar)`    | recarrega a loja do disco                      |
+| `(disco-bruto)`  | hexdump dos bytes crus de `/dev/vda`           |
+
+A loja é serializada como uma S-expressão e escrita **direto no bloco**
+`/dev/vda` — nada de ext4, FAT ou partição. No boot, o Cerne carrega o
+módulo `virtio_blk` via `finit_module(2)` e restaura a loja sozinho.
+Desligue, ligue de novo: ela continua lá.
+
 **Diversão**
 
-| Comando         | O que faz                              |
-| --------------- | -------------------------------------- |
-| `(mandelbrot)`  | desenha o Mandelbrot em ASCII colorido |
-| `(adivinhe)`    | jogo de adivinhar o número             |
+| Comando             | O que faz                                  |
+| ------------------- | ------------------------------------------ |
+| `(mandelbrot)`      | desenha o Mandelbrot em ASCII colorido     |
+| `(vida)`            | Jogo da Vida de Conway, animado            |
+| `(matrix)`          | chuva digital estilo Matrix                |
+| `(cores)`           | paleta de cores ANSI do terminal           |
+| `(vaca "texto")`    | cowsay em português                        |
+| `(pi-digitos 80)`   | dígitos de π por Machin (aritmética exata) |
+| `(senha 16)`        | gera senha com entropia de `/dev/urandom`  |
+| `(fortune)`         | frase hacker/Lisp aleatória                |
+| `(adivinhe)`        | jogo de adivinhar o número                 |
+| `(historico)`       | comandos avaliados na sessão               |
 
 Como um init de verdade, o Cerne monta `/proc`, `/sys` e `/dev` (devtmpfs)
-no boot, e fala com o kernel via `reboot(2)` e `mount(2)` na unha.
+no boot, carrega módulo do kernel via `finit_module(2)`, e fala com o
+kernel via `reboot(2)` e `mount(2)` na unha.
 
 Fora isso, é Common Lisp puro:
 

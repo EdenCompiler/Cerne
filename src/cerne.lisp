@@ -6,17 +6,24 @@
 ;;;;
 ;;;; Tudo escrito em português do Brasil de propósito.
 
+(require :sb-posix)   ; opendir/readdir, para listar diretórios (inclui /proc)
+
 (defpackage :cerne
   (:use :cl)
   (:export :inicializar
            ;; operador
-           :ajuda :desligar :reiniciar :memoria :tempo
+           :ajuda :desligar :reiniciar :memoria :tempo :cronometrar
            ;; introspecção do sistema
-           :uptime :meminfo :cpuinfo :data
+           :uptime :meminfo :cpuinfo :data :uname :cmdline :modulos
+           ;; sistema de arquivos
+           :arquivos :ver
            ;; loja chave-valor
            :lembrar :recordar :esquecer :tudo-que-lembro
+           ;; persistência em disco cru
+           :salvar :restaurar :disco-bruto
            ;; diversão
-           :mandelbrot :adivinhe))
+           :mandelbrot :adivinhe :vida :vaca :pi-digitos :historico
+           :matrix :fortune :senha :cores))
 
 (in-package :cerne)
 
@@ -57,6 +64,31 @@
     (destructuring-bind (origem destino tipo) m
       (handler-case (c-mount origem destino tipo 0 "")
         (error () nil)))))
+
+;; finit_module(2): carrega um módulo do kernel a partir de um descritor.
+;; Número da syscall no x86_64 = 313.
+(sb-alien:define-alien-routine ("syscall" sys-finit-module) sb-alien:long
+  (numero sb-alien:long)
+  (fd sb-alien:int)
+  (parametros sb-alien:c-string)
+  (flags sb-alien:int))
+
+(defun carregar-modulo (caminho)
+  "Insere um módulo .ko (descomprimido) no kernel. Usado pra ter /dev/vda."
+  (handler-case
+      (with-open-file (s caminho :element-type '(unsigned-byte 8)
+                                 :if-does-not-exist nil)
+        (when s
+          (zerop (sys-finit-module 313 (sb-sys:fd-stream-fd s) "" 0))))
+    (error () nil)))
+
+(defparameter *disco* "/dev/vda" "Bloco onde a loja chave-valor é persistida.")
+
+(defun esperar-disco (&optional (tentativas 25))
+  "Espera o devtmpfs criar o node /dev/vda, sem dormir mais que o necessário."
+  (loop repeat tentativas
+        when (probe-file *disco*) return t
+        do (sleep 0.02)))
 
 ;;; ===========================================================================
 ;;; Cores ANSI (deixa o terminal bonito; ótimo pro GIF do README)
@@ -172,6 +204,42 @@ Não confia em FILE-LENGTH porque arquivos do /proc reportam tamanho 0."
               (or modelo "desconhecida") nucleos)))
   (values))
 
+(defun uname ()
+  "Versão e identificação do kernel, lidos de /proc/sys/kernel/."
+  (flet ((ler (c) (let ((s (ler-arquivo c)))
+                    (and s (string-trim '(#\Newline #\Space) s)))))
+    (format t "~&~a ~a~%~a~%"
+            (or (ler "/proc/sys/kernel/ostype") "Linux")
+            (or (ler "/proc/sys/kernel/osrelease") "?")
+            (or (ler "/proc/sys/kernel/version") "")))
+  (values))
+
+(defun cmdline ()
+  "Argumentos de boot passados pelo kernel (/proc/cmdline)."
+  (let ((s (ler-arquivo "/proc/cmdline")))
+    (format t "~&~a" (or s "/proc/cmdline indisponível.~%")))
+  (values))
+
+(defun modulos ()
+  "Lista os módulos do kernel carregados (/proc/modules)."
+  (let ((txt (ler-arquivo "/proc/modules")))
+    (if (and txt (plusp (length txt)))
+        (with-input-from-string (s txt)
+          (loop for l = (read-line s nil) while l
+                do (format t "~&  ~a~%" (subseq l 0 (or (position #\Space l)
+                                                        (length l))))))
+        (format t "~&Nenhum módulo carregado.~%")))
+  (values))
+
+(defmacro cronometrar (&body corpo)
+  "Avalia CORPO e imprime quanto tempo levou. Macro — porque é Lisp."
+  (let ((t0 (gensym)))
+    `(let ((,t0 (get-internal-real-time)))
+       (multiple-value-prog1 (progn ,@corpo)
+         (format t "~&; ~,3F ms~%"
+                 (* 1000.0 (/ (- (get-internal-real-time) ,t0)
+                              internal-time-units-per-second)))))))
+
 (defun data ()
   "Data e hora atuais em UTC (relógio do hardware via gettimeofday)."
   (multiple-value-bind (s m h dia mes ano dow)
@@ -179,6 +247,33 @@ Não confia em FILE-LENGTH porque arquivos do /proc reportam tamanho 0."
     (let ((dias #("seg" "ter" "qua" "qui" "sex" "sáb" "dom")))
       (format t "~&~a ~2,'0d/~2,'0d/~d ~2,'0d:~2,'0d:~2,'0d UTC~%"
               (aref dias dow) dia mes ano h m s)))
+  (values))
+
+;;; ===========================================================================
+;;; Comandos: sistema de arquivos (explore o /proc, /sys, /dev)
+;;; ===========================================================================
+
+(defun arquivos (&optional (caminho "/"))
+  "Lista o conteúdo de um diretório (estilo ls)."
+  (handler-case
+      (let ((d (sb-posix:opendir caminho)))
+        (unwind-protect
+             ;; readdir devolve um alien; o fim é um ponteiro NULL, não NIL.
+             (loop for e = (sb-posix:readdir d)
+                   until (sb-alien:null-alien e)
+                   for nome = (sb-posix:dirent-name e)
+                   unless (member nome '("." "..") :test #'string=)
+                     do (format t "~&  ~a~%" nome))
+          (sb-posix:closedir d)))
+    (error (e) (format t "~&Não consegui listar ~a: ~a~%" caminho e)))
+  (values))
+
+(defun ver (caminho)
+  "Mostra o conteúdo de um arquivo (estilo cat)."
+  (let ((texto (ler-arquivo caminho)))
+    (if texto
+        (write-string texto)
+        (format t "~&Não consegui ler ~a~%" caminho)))
   (values))
 
 ;;; ===========================================================================
@@ -212,6 +307,75 @@ Não confia em FILE-LENGTH porque arquivos do /proc reportam tamanho 0."
   (if (zerop (hash-table-count *kv*))
       (format t "~&A loja está vazia.~%")
       (maphash (lambda (k v) (format t "~&  ~s => ~s~%" k v)) *kv*))
+  (values))
+
+;;; ===========================================================================
+;;; Comandos: persistência em disco CRU (sem sistema de arquivos!)
+;;;
+;;; A loja chave-valor é gravada como uma S-expressão direto nos primeiros
+;;; bytes do bloco /dev/vda. Nada de ext4, FAT ou partição — só bytes no
+;;; disco. Bem no espírito bare-metal.
+;;; ===========================================================================
+
+(defun kv->alist ()
+  (let (acc) (maphash (lambda (k v) (push (cons k v) acc)) *kv*) acc))
+
+(defun salvar ()
+  "Grava a loja chave-valor direto no bloco /dev/vda."
+  (handler-case
+      (with-open-file (f *disco* :direction :output
+                                 :if-exists :overwrite
+                                 :if-does-not-exist :error)
+        ;; uma S-expressão legível, seguida de espaço terminador
+        (let ((*print-readably* nil) (*print-pretty* nil))
+          (prin1 (kv->alist) f)
+          (write-char #\Space f))
+        (format t "~&Loja gravada em ~a (~d itens).~%"
+                *disco* (hash-table-count *kv*)))
+    (error (e) (format t "~&Não consegui salvar: ~a~%" e)))
+  (values))
+
+(defun restaurar (&optional (silencioso nil))
+  "Recarrega a loja chave-valor a partir do bloco /dev/vda."
+  (handler-case
+      (with-open-file (f *disco* :direction :input :if-does-not-exist nil)
+        (when f
+          (let* ((*read-eval* nil)            ; nunca avalia #. de disco
+                 (dados (read f nil nil)))
+            (when (listp dados)
+              (clrhash *kv*)
+              (dolist (par dados)
+                (setf (gethash (car par) *kv*) (cdr par)))
+              (unless silencioso
+                (format t "~&Loja restaurada de ~a (~d itens).~%"
+                        *disco* (hash-table-count *kv*)))
+              (return-from restaurar (values))))))
+    (error (e) (unless silencioso
+                 (format t "~&Não consegui restaurar: ~a~%" e))))
+  (unless silencioso (format t "~&Nada salvo em ~a ainda.~%" *disco*))
+  (values))
+
+(defun disco-bruto (&optional (n 128))
+  "Hexdump dos primeiros N bytes do bloco /dev/vda — os bytes crus da loja."
+  (handler-case
+      (with-open-file (f *disco* :element-type '(unsigned-byte 8)
+                                 :if-does-not-exist nil)
+        (if (null f)
+            (format t "~&~a indisponível.~%" *disco*)
+            (let ((buf (make-array n :element-type '(unsigned-byte 8))))
+              (let ((lidos (read-sequence buf f)))
+                (loop for base from 0 below lidos by 16 do
+                  (format t "~&~4,'0X  " base)
+                  (loop for i from base below (min lidos (+ base 16))
+                        do (format t "~2,'0X " (aref buf i)))
+                  (loop repeat (- (+ base 16) (min lidos (+ base 16)))
+                        do (format t "   "))
+                  (write-string " |")
+                  (loop for i from base below (min lidos (+ base 16))
+                        for b = (aref buf i)
+                        do (write-char (if (<= 32 b 126) (code-char b) #\.)))
+                  (write-char #\|))))))
+    (error (e) (format t "~&Erro lendo o disco: ~a~%" e)))
   (values))
 
 ;;; ===========================================================================
@@ -264,6 +428,182 @@ Não confia em FILE-LENGTH porque arquivos do /proc reportam tamanho 0."
                   (return))))))))
   (values))
 
+(defun vida (&optional (geracoes 40) (largura 60) (altura 22))
+  "Jogo da Vida de Conway, animado no terminal (sopa aleatória inicial)."
+  (setf *random-state* (make-random-state t))
+  (let ((g (make-array (list altura largura)))
+        (esc (code-char 27)))
+    (dotimes (y altura) (dotimes (x largura)
+                          (setf (aref g y x) (if (< (random 100) 30) 1 0))))
+    (flet ((vizinhos (y x)
+             (let ((c 0))
+               (loop for dy from -1 to 1 do
+                 (loop for dx from -1 to 1 do
+                   (unless (and (zerop dy) (zerop dx))
+                     (incf c (aref g (mod (+ y dy) altura)
+                                     (mod (+ x dx) largura))))))
+               c)))
+      (dotimes (_ geracoes)
+        (format t "~c[2J~c[H" esc esc)          ; limpa tela e volta ao topo
+        (dotimes (y altura)
+          (dotimes (x largura)
+            (if (plusp (aref g y x))
+                (write-string (verde "#"))
+                (write-char #\Space)))
+          (terpri))
+        (finish-output)
+        (sleep 0.08)
+        (let ((novo (make-array (list altura largura))))
+          (dotimes (y altura)
+            (dotimes (x largura)
+              (let ((n (vizinhos y x)) (viva (plusp (aref g y x))))
+                (setf (aref novo y x)
+                      (if (or (= n 3) (and viva (= n 2))) 1 0)))))
+          (setf g novo)))))
+  (values))
+
+(defun vaca (&optional (texto "Mééé! Lisp no metal."))
+  "Cowsay em português. A vaca diz o que você mandar."
+  (let* ((s (princ-to-string texto)) (n (length s)))
+    (format t "~& ~a~%" (make-string (+ n 2) :initial-element #\_))
+    (format t " < ~a >~%" s)
+    (format t " ~a~%" (make-string (+ n 2) :initial-element #\-))
+    (write-line "        \\   ^__^")
+    (write-line "         \\  (oo)\\_______")
+    (write-line "            (__)\\       )\\/\\")
+    (write-line "                ||----w |")
+    (write-line "                ||     ||"))
+  (values))
+
+(defun pi-digitos (&optional (digitos 50))
+  "Calcula DIGITOS casas de π pela fórmula de Machin, em aritmética exata.
+   pi = 16*arctan(1/5) - 4*arctan(1/239)"
+  ;; usa uma casa extra de guarda pra não arredondar errado a última
+  (let ((escala (expt 10 (+ digitos 2))))
+    (flet ((arctan-inv (x)
+             (let ((soma 0) (k 0)
+                   (potencia (truncate escala x))
+                   (x2 (* x x)))
+               (loop while (/= potencia 0) do
+                 (let ((parcela (truncate potencia (1+ (* 2 k)))))
+                   (if (evenp k) (incf soma parcela) (decf soma parcela)))
+                 (setf potencia (truncate potencia x2))
+                 (incf k))
+               soma)))
+      (let ((p (truncate (- (* 16 (arctan-inv 5)) (* 4 (arctan-inv 239))) 100)))
+        (multiple-value-bind (inteiro resto) (truncate p (expt 10 digitos))
+          (format t "~&~d.~v,'0d~%" inteiro digitos resto)))))
+  (values))
+
+(defvar *historico* '() "Formas avaliadas nesta sessão, mais recente primeiro.")
+
+(defun historico ()
+  "Mostra os comandos avaliados nesta sessão."
+  (if (null *historico*)
+      (format t "~&Histórico vazio.~%")
+      (loop for forma in (reverse *historico*)
+            for i from 1
+            do (format t "~&~3d  ~s~%" i forma)))
+  (values))
+
+(defun matrix (&optional (quadros 120) (largura 78) (altura 24))
+  "Chuva digital estilo Matrix, em verde no terminal."
+  (setf *random-state* (make-random-state t))
+  (let ((esc (code-char 27))
+        (alfa "01ABCDEFGHIKLMNPRSTVXZ#$%&*+=<>?@")
+        (gotas (make-array largura))
+        (rastro 9))
+    (dotimes (c largura) (setf (aref gotas c) (- (random altura))))
+    (flet ((sorteia () (char alfa (random (length alfa)))))
+      (format t "~c[2J" esc)
+      (dotimes (_ quadros)
+        (format t "~c[H" esc)                ; volta ao topo (sem limpar = menos flicker)
+        (dotimes (y altura)
+          (dotimes (c largura)
+            (let ((d (- (aref gotas c) y)))   ; distância acima da cabeça
+              (cond
+                ((= d 0)  (format t "~c[1;37m~c" esc (sorteia)))   ; cabeça branca
+                ((<= 1 d rastro)
+                 (format t "~c[0;32m~c" esc (sorteia)))            ; rastro verde
+                (t (write-char #\Space)))))
+          (terpri))
+        (format t "~c[0m" esc)
+        (finish-output)
+        (sleep 0.06)
+        (dotimes (c largura)
+          (incf (aref gotas c))
+          (when (> (- (aref gotas c) rastro) altura)
+            (setf (aref gotas c) (- (random (truncate altura 2)))))))
+      (format t "~c[0m" esc)))
+  (values))
+
+(defparameter *fortunes*
+  '("LISP: a única linguagem que é seu próprio interpretador."
+    "Todo programa cresce até poder ler e-mail. O Cerne ainda resiste."
+    "Não há sistema operacional. Há apenas o REPL."
+    "Parênteses não são complexidade. São honestidade."
+    "Macros: quando você quer reescrever a linguagem antes do café."
+    "O metal é frio. O Lisp é eterno."
+    "Garbage collector roda. A consciência, não."
+    "Quem precisa de shell quando se tem eval?"
+    "A recursão é só um loop que confia em si mesmo."
+    "Code is data. Data is code. O resto é detalhe."
+    "Greenspun, regra 10: todo programa grande contém um Lisp mal feito."
+    "car, cdr, e a fé de que a lista tem fim."
+    "PID 1 não pede permissão. PID 1 é a permissão."
+    "Booto, logo penso. Penso em S-expressões."
+    "Não existe bug. Existe um caso que você ainda não fez quote."
+    "O kernel dá os syscalls. O Lisp dá os parênteses. Casamento perfeito."
+    "Lambda é o operador. O resto é açúcar."
+    "Quem controla as macros controla o universo."
+    "Closures: variáveis que se recusam a morrer."
+    "setq é confissão. let é redenção."
+    "Em caso de pânico do kernel: respire, e (desligar)."
+    "Homoiconicidade: a palavra mais difícil que você vai amar."
+    "Tail call: a recursão que não enche a pilha de orgulho."
+    "Memória é volátil. /dev/vda nem tanto. Use (salvar)."
+    "Um nil bem colocado vale mais que mil ifs."
+    "Compilar é só pedir desculpa ao processador com antecedência."
+    "O verdadeiro unikernel mora no coração de quem evita o systemd."
+    "A vaca diz mééé. O Lisp diz (quote mééé)."
+    "Stack overflow não é um site. É um estilo de vida recursivo."
+    "Primeiro resolva o problema. Depois escreva a macro."))
+
+(defun fortune ()
+  "Imprime uma frase aleatória."
+  (setf *random-state* (make-random-state t))
+  (format t "~&~a~%" (ciano (nth (random (length *fortunes*)) *fortunes*)))
+  (values))
+
+(defun senha (&optional (tamanho 16))
+  "Gera uma senha forte usando entropia de /dev/urandom."
+  (let ((alfa "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789!@#%&*+=?")
+        (saida (make-string tamanho)))
+    (handler-case
+        (with-open-file (f "/dev/urandom" :element-type '(unsigned-byte 8))
+          (dotimes (i tamanho)
+            (setf (char saida i) (char alfa (mod (read-byte f) (length alfa))))))
+      (error ()
+        ;; sem /dev/urandom, cai no PRNG do Lisp
+        (setf *random-state* (make-random-state t))
+        (dotimes (i tamanho)
+          (setf (char saida i) (char alfa (random (length alfa)))))))
+    (format t "~&~a~%" (amarelo saida)))
+  (values))
+
+(defun cores ()
+  "Mostra a paleta de cores ANSI que o terminal suporta."
+  (let ((esc (code-char 27)))
+    (dolist (base '(30 90))
+      (loop for c from base to (+ base 7)
+            do (format t "~c[~am ~3d ~c[0m" esc c c esc))
+      (terpri))
+    (dolist (base '(40 100))
+      (loop for c from base to (+ base 7)
+            do (format t "~c[~am ~3d ~c[0m" esc c c esc))
+      (terpri)))
+  (values))
+
 ;;; ===========================================================================
 ;;; Ajuda
 ;;; ===========================================================================
@@ -272,13 +612,18 @@ Não confia em FILE-LENGTH porque arquivos do /proc reportam tamanho 0."
   "Lista os comandos disponíveis."
   (format t "~&~a~%~
   Operador:~%~
-    (ajuda) (memoria) (tempo) (reiniciar) (desligar)~%~
+    (ajuda) (memoria) (tempo) (cronometrar forma...) (reiniciar) (desligar)~%~
   Sistema (via /proc):~%~
-    (uptime) (meminfo) (cpuinfo) (data)~%~
+    (uptime) (meminfo) (cpuinfo) (data) (uname) (cmdline) (modulos)~%~
+  Arquivos:~%~
+    (arquivos \"/proc\") (ver \"/proc/cmdline\")~%~
   Memória chave-valor:~%~
     (lembrar chave valor) (recordar chave) (esquecer chave) (tudo-que-lembro)~%~
+  Persistência em disco cru (/dev/vda, sem sistema de arquivos):~%~
+    (salvar) (restaurar) (disco-bruto)~%~
   Diversão:~%~
-    (mandelbrot) (adivinhe)~%~
+    (mandelbrot) (vida) (matrix) (cores) (vaca \"texto\") (pi-digitos 80)~%~
+    (adivinhe) (fortune) (senha 16) (historico)~%~
 ~%  Fora isso, é Common Lisp puro: (+ 1 2 3), (loop for i below 5 collect (* i i))~%"
           (negrito "Comandos do Cerne (tudo é Lisp — chame como função):"))
   (values))
@@ -321,6 +666,7 @@ Não confia em FILE-LENGTH porque arquivos do /proc reportam tamanho 0."
         ((eq forma :erro-leitura)
          (read-line *standard-input* nil nil))
         (t
+         (push forma *historico*)
          (handler-case
              (let ((resultados (multiple-value-list (eval forma))))
                (if resultados
@@ -339,6 +685,9 @@ Não confia em FILE-LENGTH porque arquivos do /proc reportam tamanho 0."
   ;; Então montamos os FS, protegemos tudo e, no fim, desligamos limpo.
   (montar-sistemas-de-arquivos)
   (setf *package* (find-package :cerne))   ; (ajuda)/(desligar) resolvem direto
+  (carregar-modulo "/lib/modules/virtio_blk.ko")  ; faz aparecer /dev/vda
+  (esperar-disco)                          ; aguarda só o necessário pelo node
+  (restaurar t)                            ; recarrega a loja do disco, se houver
   (handler-case
       (progn
         (banner)
