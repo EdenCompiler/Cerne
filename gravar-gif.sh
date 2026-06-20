@@ -26,6 +26,6 @@ script -qec "asciinema rec --overwrite --cols 90 --rows 30 -c $wrapper $cast_tmp
 cp "$cast_tmp" "$cast"
 
 echo ">> Convertendo pra GIF (agg)"
-agg --cols 90 --rows 30 --font-size 18 --speed 0.9 "$cast" "$gif"
+agg --cols 90 --rows 30 --font-size 18 --speed 1.0 --fps-cap 12 "$cast" "$gif"
 
 echo ">> Pronto: $gif ($(du -h "$gif" | cut -f1))"

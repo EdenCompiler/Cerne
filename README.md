@@ -65,8 +65,12 @@ Para desligar: digite `(desligar)` no REPL, ou `Ctrl-A` seguido de `X`.
 
 **Velocidade:** com KVM (`/dev/kvm`), o boot até o REPL leva **~1.6s**.
 Os scripts usam KVM automaticamente quando disponível e caem pra emulação
-(TCG, ~10s) quando não há. A rede é desligada (`-nic none`) porque o núcleo
-não precisa dela.
+(TCG, ~10s) quando não há.
+
+**Rede:** os scripts ligam uma interface virtio-net e encaminham a porta
+`2323` do host. Dentro do REPL, `(telnet)` serve um REPL completo por TCP —
+conecte de fora com `nc localhost 2323` e avalie Lisp na máquina remota
+(inclusive `(desligar)`).
 
 Alvos separados:
 
@@ -79,13 +83,15 @@ make limpar    # apaga build/
 
 ## Comandos do núcleo
 
-Tudo é Lisp — os "comandos" são só funções:
+Tudo é Lisp — os "comandos" são só funções. O REPL tem **edição de linha**
+(modo cru da tty via `termios`): setas ←→ movem o cursor, ↑↓ navegam o
+histórico, e backspace / Ctrl-A / Ctrl-E funcionam como você espera.
 
 **Operador**
 
 | Comando        | O que faz                          |
 | -------------- | ---------------------------------- |
-| `(ajuda)`      | lista os comandos                  |
+| `(ajuda)` / `(ajuda 'cmd)` | lista comandos / doc de um |
 | `(memoria)`    | uso de memória do núcleo           |
 | `(tempo)`      | tempo de vida do REPL              |
 | `(cronometrar forma...)` | mede o tempo de avaliar formas |
@@ -103,6 +109,8 @@ Tudo é Lisp — os "comandos" são só funções:
 | `(uname)`    | versão do kernel                   |
 | `(cmdline)`  | argumentos de boot do kernel       |
 | `(modulos)`  | módulos do kernel carregados       |
+| `(pci)`      | dispositivos PCI (via `/sys`)      |
+| `(rtc)`      | data/hora do chip RTC (porta I/O)  |
 
 **Arquivos** (explore os pseudo-FS do kernel)
 
@@ -110,6 +118,24 @@ Tudo é Lisp — os "comandos" são só funções:
 | ------------------------ | ---------------------------- |
 | `(arquivos "/proc")`     | lista um diretório (ls)      |
 | `(ver "/proc/cmdline")`  | mostra um arquivo (cat)      |
+
+**Rede**
+
+| Comando         | O que faz                                       |
+| --------------- | ----------------------------------------------- |
+| `(rede)`        | sobe a interface e mostra o IP                  |
+| `(telnet 2323)` | serve um REPL por TCP (`nc localhost 2323`)     |
+
+A interface virtio-net sobe na unha via `ioctl(SIOCSIFADDR…)` (struct
+`ifreq`), sem `ifconfig`. O REPL remoto avalia Lisp por um socket TCP.
+
+**Lisp / meta**
+
+| Comando                          | O que faz                              |
+| -------------------------------- | -------------------------------------- |
+| `(quine)`                        | forma que se reproduz ao ser avaliada  |
+| `(desmontar 'fib)`               | mostra o código de máquina da função   |
+| `(macroexpandir '(when a b))`    | expande uma macro um nível             |
 
 **Memória chave-valor** (vive enquanto a máquina viver)
 
@@ -140,7 +166,13 @@ Desligue, ligue de novo: ela continua lá.
 | `(mandelbrot)`      | desenha o Mandelbrot em ASCII colorido     |
 | `(vida)`            | Jogo da Vida de Conway, animado            |
 | `(matrix)`          | chuva digital estilo Matrix                |
+| `(plasma)`          | plasma colorido animado (cores 256)        |
+| `(fogo)`            | efeito de fogo ASCII animado               |
+| `(snake)`           | jogo da cobra (setas/WASD, q sai)          |
 | `(cores)`           | paleta de cores ANSI do terminal           |
+| `(relogio 10)`      | relógio digital grande, ao vivo            |
+| `(arvore)`          | árvore fractal em ASCII                     |
+| `(grafico lista)`   | gráfico de barras de uma lista             |
 | `(vaca "texto")`    | cowsay em português                        |
 | `(pi-digitos 80)`   | dígitos de π por Machin (aritmética exata) |
 | `(senha 16)`        | gera senha com entropia de `/dev/urandom`  |

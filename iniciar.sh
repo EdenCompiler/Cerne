@@ -45,7 +45,8 @@ exec qemu-system-x86_64 \
   -append "console=ttyS0 quiet loglevel=0 sysctl.debug.exception-trace=0 panic=-1" \
   -m 512M \
   "${acel[@]}" \
-  -nic none \
+  -netdev user,id=net0,hostfwd=tcp::2323-:2323 \
+  -device virtio-net-pci,netdev=net0 \
   -drive "file=$disco,format=raw,if=virtio" \
   -nographic \
   -no-reboot

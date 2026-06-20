@@ -6,7 +6,8 @@
 ;;;;
 ;;;; Tudo escrito em português do Brasil de propósito.
 
-(require :sb-posix)   ; opendir/readdir, para listar diretórios (inclui /proc)
+(require :sb-posix)         ; opendir/readdir, para listar diretórios (inclui /proc)
+(require :sb-bsd-sockets)   ; sockets TCP, para o REPL via telnet
 
 (defpackage :cerne
   (:use :cl)
@@ -14,16 +15,21 @@
            ;; operador
            :ajuda :desligar :reiniciar :memoria :tempo :cronometrar
            ;; introspecção do sistema
-           :uptime :meminfo :cpuinfo :data :uname :cmdline :modulos
+           :uptime :meminfo :cpuinfo :data :uname :cmdline :modulos :pci :rtc
            ;; sistema de arquivos
            :arquivos :ver
+           ;; rede
+           :rede :telnet
            ;; loja chave-valor
            :lembrar :recordar :esquecer :tudo-que-lembro
            ;; persistência em disco cru
            :salvar :restaurar :disco-bruto
+           ;; meta / Lisp
+           :quine :desmontar :macroexpandir
            ;; diversão
            :mandelbrot :adivinhe :vida :vaca :pi-digitos :historico
-           :matrix :fortune :senha :cores))
+           :matrix :fortune :senha :cores :relogio :arvore :grafico
+           :fogo :plasma :snake))
 
 (in-package :cerne)
 
@@ -231,6 +237,49 @@ Não confia em FILE-LENGTH porque arquivos do /proc reportam tamanho 0."
         (format t "~&Nenhum módulo carregado.~%")))
   (values))
 
+(defun pci ()
+  "Lista os dispositivos PCI lendo /sys/bus/pci/devices/."
+  (let ((dir "/sys/bus/pci/devices"))
+    (handler-case
+        (let ((d (sb-posix:opendir dir)) (achou nil))
+          (unwind-protect
+               (loop for e = (sb-posix:readdir d)
+                     until (sb-alien:null-alien e)
+                     for nome = (sb-posix:dirent-name e)
+                     unless (member nome '("." "..") :test #'string=)
+                       do (setf achou t)
+                          (flet ((campo (c)
+                                   (let ((s (ler-arquivo (format nil "~a/~a/~a" dir nome c))))
+                                     (and s (string-trim '(#\Newline #\Space) s)))))
+                            (format t "~&  ~a  ~a:~a  classe ~a~%"
+                                    nome
+                                    (or (campo "vendor") "?")
+                                    (or (campo "device") "?")
+                                    (or (campo "class") "?"))))
+            (sb-posix:closedir d))
+          (unless achou (format t "~&Nenhum dispositivo PCI.~%")))
+      (error (e) (format t "~&Não consegui ler ~a: ~a~%" dir e))))
+  (values))
+
+(defun cmos (registrador)
+  "Lê um registrador do chip RTC/CMOS via as portas 0x70/0x71 (/dev/port)."
+  (with-open-file (p "/dev/port" :direction :io
+                                 :element-type '(unsigned-byte 8)
+                                 :if-exists :overwrite)
+    (file-position p #x70) (write-byte registrador p) (finish-output p)
+    (file-position p #x71) (read-byte p)))
+
+(defun rtc ()
+  "Lê data/hora direto do chip RTC pela porta de I/O (flex bare-metal)."
+  (handler-case
+      (flet ((bcd (v) (+ (* 10 (ash v -4)) (logand v #x0f))))
+        (let ((s (bcd (cmos 0))) (mi (bcd (cmos 2))) (h (bcd (cmos 4)))
+              (d (bcd (cmos 7))) (mo (bcd (cmos 8))) (a (bcd (cmos 9))))
+          (format t "~&RTC (chip, via porta 0x70/0x71): ~2,'0d/~2,'0d/20~2,'0d ~2,'0d:~2,'0d:~2,'0d~%"
+                  d mo a h mi s)))
+    (error (e) (format t "~&Não consegui ler o RTC: ~a~%" e)))
+  (values))
+
 (defmacro cronometrar (&body corpo)
   "Avalia CORPO e imprime quanto tempo levou. Macro — porque é Lisp."
   (let ((t0 (gensym)))
@@ -376,6 +425,31 @@ Não confia em FILE-LENGTH porque arquivos do /proc reportam tamanho 0."
                         do (write-char (if (<= 32 b 126) (code-char b) #\.)))
                   (write-char #\|))))))
     (error (e) (format t "~&Erro lendo o disco: ~a~%" e)))
+  (values))
+
+;;; ===========================================================================
+;;; Comandos: meta (o Lisp olhando pra si mesmo)
+;;; ===========================================================================
+
+(defun quine ()
+  "Mostra uma forma que se reproduz quando avaliada (um quine)."
+  (let ((q '((lambda (x) (list x (list 'quote x)))
+             '(lambda (x) (list x (list 'quote x))))))
+    (format t "~&Forma que se reproduz ao ser avaliada:~%")
+    (let ((*print-pretty* nil)) (prin1 q) (terpri))
+    (format t "; (eval forma) é igual à forma? ~a~%" (equal q (eval q))))
+  (values))
+
+(defun desmontar (fn)
+  "Mostra o código de máquina de uma função (FN pode ser símbolo ou função).
+Prova que o Cerne compila Lisp pra instruções reais da CPU."
+  (disassemble (if (symbolp fn) (symbol-function fn) fn))
+  (values))
+
+(defun macroexpandir (forma)
+  "Expande uma macro um nível. Passe a forma com quote: (macroexpandir '(when a b))."
+  (let ((*print-pretty* t))
+    (prin1 (macroexpand-1 forma)) (terpri))
   (values))
 
 ;;; ===========================================================================
@@ -604,28 +678,226 @@ Não confia em FILE-LENGTH porque arquivos do /proc reportam tamanho 0."
       (terpri)))
   (values))
 
+(defparameter *digitos-grandes*
+  (let ((h (make-hash-table)))
+    (flet ((p (ch &rest linhas) (setf (gethash ch h) linhas)))
+      (p #\0 "####" "#  #" "#  #" "#  #" "####")
+      (p #\1 "  # " " ## " "  # " "  # " " ###")
+      (p #\2 "####" "   #" "####" "#   " "####")
+      (p #\3 "####" "   #" " ###" "   #" "####")
+      (p #\4 "#  #" "#  #" "####" "   #" "   #")
+      (p #\5 "####" "#   " "####" "   #" "####")
+      (p #\6 "####" "#   " "####" "#  #" "####")
+      (p #\7 "####" "   #" "  # " " #  " " #  ")
+      (p #\8 "####" "#  #" "####" "#  #" "####")
+      (p #\9 "####" "#  #" "####" "   #" "####")
+      (p #\: "    " " ## " "    " " ## " "    "))
+    h))
+
+(defun relogio (&optional (segundos 10))
+  "Relógio digital grande, ao vivo, em UTC (Ctrl-C ou aguarde o fim)."
+  (let ((esc (code-char 27)))
+    (dotimes (_ segundos)
+      (multiple-value-bind (s m h) (decode-universal-time (get-universal-time) 0)
+        (let ((txt (format nil "~2,'0d:~2,'0d:~2,'0d" h m s)))
+          (format t "~c[2J~c[H~%~%" esc esc)
+          (dotimes (linha 5)
+            (write-string "   ")
+            (loop for ch across txt
+                  for padrao = (gethash ch *digitos-grandes*)
+                  do (write-string (ciano (if padrao (nth linha padrao) "    ")))
+                     (write-string " "))
+            (terpri))
+          (finish-output)))
+      (sleep 1)))
+  (values))
+
+(defun arvore (&optional (profundidade 9) (largura 70) (altura 30))
+  "Desenha uma árvore fractal em ASCII."
+  (let ((grade (make-array (list altura largura) :initial-element #\Space)))
+    (labels ((plota (x y c)
+               (let ((ix (round x)) (iy (round y)))
+                 (when (and (<= 0 iy (1- altura)) (<= 0 ix (1- largura)))
+                   (setf (aref grade iy ix) c))))
+             (galho (x y angulo comprimento prof)
+               (let* ((x2 (+ x (* (cos angulo) comprimento)))
+                      (y2 (- y (* (sin angulo) comprimento)))
+                      (passos (max 1 (round comprimento)))
+                      (c (cond ((> (cos angulo) 0.4) #\\)
+                               ((< (cos angulo) -0.4) #\/)
+                               (t #\|))))
+                 (dotimes (i (1+ passos))
+                   (let ((tt (/ i passos)))
+                     (plota (+ x (* (- x2 x) tt)) (+ y (* (- y2 y) tt))
+                            (if (zerop prof) #\* c))))
+                 (when (> prof 0)
+                   (galho x2 y2 (+ angulo 0.5) (* comprimento 0.72) (1- prof))
+                   (galho x2 y2 (- angulo 0.5) (* comprimento 0.72) (1- prof))))))
+      (galho (/ largura 2.0) (1- altura) (/ pi 2) (/ altura 3.2) profundidade)
+      (dotimes (y altura)
+        (dotimes (x largura)
+          (let ((c (aref grade y x)))
+            (if (char= c #\*) (write-string (verde "*")) (write-char c))))
+        (terpri))))
+  (values))
+
+(defun grafico (dados &optional (altura 10))
+  "Gráfico de barras ASCII de uma lista de números."
+  (when dados
+    (let* ((maxv (reduce #'max dados))
+           (maxv (if (zerop maxv) 1 maxv)))
+      (loop for r from altura downto 1 do
+        (dolist (v dados)
+          (if (>= (* (/ v maxv) altura) r)
+              (write-string (ciano "##"))
+              (write-string "  "))
+          (write-char #\Space))
+        (terpri))
+      (dotimes (i (length dados)) (write-string "---"))
+      (terpri)))
+  (values))
+
+(defun fogo (&optional (frames 90) (largura 70) (altura 24))
+  "Efeito de fogo ASCII animado (estilo demoscene)."
+  (setf *random-state* (make-random-state t))
+  (let ((g (make-array (list (1+ altura) largura) :initial-element 0))
+        (paleta " ..::!!**##@@")
+        (esc (code-char 27)))
+    (format t "~c[2J" esc)                 ; limpa a tela antes de começar
+    (dotimes (_ frames)
+      ;; base quente embaixo
+      (dotimes (x largura) (setf (aref g altura x) (random 12)))
+      ;; propaga pra cima com resfriamento
+      (loop for y from (1- altura) downto 0 do
+        (dotimes (x largura)
+          (let ((soma (+ (aref g (1+ y) x)
+                         (aref g (1+ y) (mod (1- x) largura))
+                         (aref g (1+ y) (mod (1+ x) largura))
+                         (aref g (min altura (+ y 2)) x))))
+            (setf (aref g y x) (max 0 (- (truncate soma 4) (if (zerop (random 3)) 1 0)))))))
+      (format t "~c[H" esc)
+      (dotimes (y altura)
+        (dotimes (x largura)
+          (let* ((v (min 11 (aref g y x)))
+                 (cor (cond ((>= v 9) "1;37") ((>= v 6) "1;33")
+                            ((>= v 3) "0;31") (t "0;31"))))
+            (format t "~c[~am~c" esc cor (char paleta v))))
+        (terpri))
+      (format t "~c[0m" esc) (finish-output)
+      (sleep 0.05))
+    (format t "~c[0m" esc))
+  (values))
+
+(defun plasma (&optional (frames 80) (largura 72) (altura 24))
+  "Plasma colorido animado (combinação de senos), em cores 256."
+  (let ((esc (code-char 27)))
+    (format t "~c[2J" esc)
+    (dotimes (f frames)
+      (format t "~c[H" esc)
+      (dotimes (y altura)
+        (dotimes (x largura)
+          (let* ((v (+ (sin (+ (/ x 6.0) (* f 0.2)))
+                       (sin (/ y 4.0))
+                       (sin (/ (+ x y) 8.0))
+                       (sin (+ (/ (sqrt (+ (* x x) (* y y))) 7.0) (* f 0.15)))))
+                 ;; mapeia -4..4 para uma rampa de cores 256
+                 (cor (+ 16 (mod (round (* (+ v 4) 32)) 216))))
+            (format t "~c[48;5;~dm " esc cor)))
+        (terpri))
+      (format t "~c[0m" esc) (finish-output)
+      (sleep 0.05))
+    (format t "~c[0m~c[2J~c[H" esc esc esc))
+  (values))
+
+(defun snake (&optional (largura 40) (altura 18))
+  "Jogo da cobra. Setas ou WASD pra virar, 'q' sai. Precisa de terminal."
+  (setf *random-state* (make-random-state t))
+  (let* ((esc (code-char 27))
+         (cobra (list (cons (truncate largura 2) (truncate altura 2))))
+         (dx 1) (dy 0)
+         (comida (cons (random largura) (random altura)))
+         (vivo t) (pontos 0))
+    (labels ((tecla ()
+               (loop while (listen *standard-input*)
+                     do (let ((c (read-char *standard-input* nil nil)))
+                          (cond
+                            ((null c) (return))
+                            ((char= c esc)
+                             (when (and (listen *standard-input*)
+                                        (eql (read-char *standard-input* nil nil) #\[))
+                               (case (read-char *standard-input* nil nil)
+                                 (#\A (unless (= dy 1) (setf dx 0 dy -1)))
+                                 (#\B (unless (= dy -1) (setf dx 0 dy 1)))
+                                 (#\C (unless (= dx -1) (setf dx 1 dy 0)))
+                                 (#\D (unless (= dx 1) (setf dx -1 dy 0))))))
+                            ((member c '(#\w #\W)) (unless (= dy 1) (setf dx 0 dy -1)))
+                            ((member c '(#\s #\S)) (unless (= dy -1) (setf dx 0 dy 1)))
+                            ((member c '(#\d #\D)) (unless (= dx -1) (setf dx 1 dy 0)))
+                            ((member c '(#\a #\A)) (unless (= dx 1) (setf dx -1 dy 0)))
+                            ((member c '(#\q #\Q)) (setf vivo nil))))))
+             (desenha ()
+               (format t "~c[H" esc)
+               (format t "Cobra — pontos: ~d  (q sai)~%" pontos)
+               (dotimes (y altura)
+                 (dotimes (x largura)
+                   (cond
+                     ((member (cons x y) cobra :test #'equal) (write-string (verde "#")))
+                     ((equal (cons x y) comida) (write-string (amarelo "@")))
+                     (t (write-char #\.))))
+                 (terpri))
+               (finish-output)))
+      (format t "~c[2J" esc)
+      (loop while vivo do
+        (tecla)
+        (let* ((cab (car cobra))
+               (nx (+ (car cab) dx)) (ny (+ (cdr cab) dy))
+               (nova (cons nx ny)))
+          (when (or (< nx 0) (>= nx largura) (< ny 0) (>= ny altura)
+                    (member nova cobra :test #'equal))
+            (setf vivo nil) (return))
+          (push nova cobra)
+          (if (equal nova comida)
+              (progn (incf pontos)
+                     (setf comida (cons (random largura) (random altura))))
+              (setf cobra (nbutlast cobra)))
+          (desenha)
+          (sleep 0.11)))
+      (format t "~c[2J~c[HFim de jogo! Pontos: ~d~%" esc esc pontos)))
+  (values))
+
 ;;; ===========================================================================
 ;;; Ajuda
 ;;; ===========================================================================
 
-(defun ajuda ()
-  "Lista os comandos disponíveis."
-  (format t "~&~a~%~
+(defun ajuda (&optional comando)
+  "Lista os comandos. Com argumento, mostra a doc: (ajuda 'mandelbrot)."
+  (if comando
+      (let* ((sim (if (symbolp comando) comando
+                      (and (functionp comando) (nth-value 2 (function-lambda-expression comando)))))
+             (doc (and sim (documentation sim 'function))))
+        (format t "~&~a: ~a~%" (or sim comando) (or doc "sem documentação")))
+      (format t "~&~a~%~
   Operador:~%~
-    (ajuda) (memoria) (tempo) (cronometrar forma...) (reiniciar) (desligar)~%~
-  Sistema (via /proc):~%~
-    (uptime) (meminfo) (cpuinfo) (data) (uname) (cmdline) (modulos)~%~
+    (ajuda [cmd]) (memoria) (tempo) (cronometrar forma...) (reiniciar) (desligar)~%~
+  Sistema (via /proc e /sys):~%~
+    (uptime) (meminfo) (cpuinfo) (data) (uname) (cmdline) (modulos) (pci) (rtc)~%~
   Arquivos:~%~
     (arquivos \"/proc\") (ver \"/proc/cmdline\")~%~
+  Rede:~%~
+    (rede) (telnet 2323)~%~
+  Lisp / meta:~%~
+    (quine) (desmontar (quote fib)) (macroexpandir (quote (when a b)))~%~
   Memória chave-valor:~%~
     (lembrar chave valor) (recordar chave) (esquecer chave) (tudo-que-lembro)~%~
   Persistência em disco cru (/dev/vda, sem sistema de arquivos):~%~
     (salvar) (restaurar) (disco-bruto)~%~
   Diversão:~%~
-    (mandelbrot) (vida) (matrix) (cores) (vaca \"texto\") (pi-digitos 80)~%~
+    (mandelbrot) (vida) (matrix) (plasma) (fogo) (snake) (cores) (relogio 10)~%~
+    (arvore) (grafico (list 3 7 2 9 5)) (vaca \"texto\") (pi-digitos 80)~%~
     (adivinhe) (fortune) (senha 16) (historico)~%~
+~%  Dica: setas ←→ movem, ↑↓ navegam o histórico de comandos.~%~
 ~%  Fora isso, é Common Lisp puro: (+ 1 2 3), (loop for i below 5 collect (* i i))~%"
-          (negrito "Comandos do Cerne (tudo é Lisp — chame como função):"))
+          (negrito "Comandos do Cerne (tudo é Lisp — chame como função):")))
   (values))
 
 ;;; ===========================================================================
@@ -647,33 +919,260 @@ Não confia em FILE-LENGTH porque arquivos do /proc reportam tamanho 0."
           (lisp-implementation-version) (ciano "(ajuda)")))
 
 ;;; ===========================================================================
+;;; Edição de linha (modo cru do terminal: setas, histórico, backspace)
+;;; ===========================================================================
+
+(defvar *termios-salvo* nil)
+(defparameter *linhas* (make-array 0 :element-type t :adjustable t :fill-pointer 0)
+  "Histórico de linhas digitadas, para navegar com as setas.")
+
+(defun ativar-modo-cru ()
+  "Põe a tty em modo cru (sem eco e sem buffer de linha). NIL se não for tty."
+  (handler-case
+      (let ((tm (sb-posix:tcgetattr 0)))
+        (setf *termios-salvo* (sb-posix:tcgetattr 0))
+        (setf (sb-posix:termios-lflag tm)
+              (logandc2 (sb-posix:termios-lflag tm)
+                        (logior sb-posix:icanon sb-posix:echo)))
+        (sb-posix:tcsetattr 0 sb-posix:tcsanow tm)
+        t)
+    (error () nil)))
+
+(defun restaurar-modo ()
+  (when *termios-salvo*
+    (ignore-errors (sb-posix:tcsetattr 0 sb-posix:tcsanow *termios-salvo*))))
+
+(defun ler-linha-editada (prompt)
+  "Lê uma linha com edição: setas ←→, ↑↓ (histórico), backspace, Ctrl-A/E/D.
+Retorna a string, ou :eof."
+  (let ((buf (make-array 16 :element-type 'character :adjustable t :fill-pointer 0))
+        (cur 0)
+        (nav (fill-pointer *linhas*))   ; índice no histórico; = tamanho => linha nova
+        (esc (code-char 27)))
+    (labels ((tam () (fill-pointer buf))
+             (texto () (coerce buf 'string))
+             (trocar (s)
+               (setf (fill-pointer buf) 0)
+               (loop for c across s do (vector-push-extend c buf))
+               (setf cur (tam)))
+             (inserir (c)
+               (vector-push-extend #\Space buf)
+               (loop for i from (1- (tam)) above cur do (setf (aref buf i) (aref buf (1- i))))
+               (setf (aref buf cur) c)
+               (incf cur))
+             (apagar ()
+               (when (> cur 0)
+                 (loop for i from (1- cur) below (1- (tam)) do (setf (aref buf i) (aref buf (1+ i))))
+                 (decf (fill-pointer buf))
+                 (decf cur)))
+             (redesenha ()
+               (format t "~c~a~a~c[K" #\Return prompt (texto) esc)
+               (when (< cur (tam)) (format t "~c[~dD" esc (- (tam) cur)))
+               (finish-output)))
+      (format t "~a" prompt) (finish-output)
+      (loop
+        (let ((c (read-char *standard-input* nil :eof)))
+          (cond
+            ((eq c :eof) (return :eof))
+            ((or (char= c #\Return) (char= c #\Newline)) (terpri) (return (texto)))
+            ((or (char= c #\Rubout) (char= c (code-char 8))) (apagar) (redesenha))
+            ((char= c (code-char 1)) (setf cur 0) (redesenha))            ; Ctrl-A
+            ((char= c (code-char 5)) (setf cur (tam)) (redesenha))        ; Ctrl-E
+            ((char= c (code-char 4)) (when (zerop (tam)) (return :eof)))  ; Ctrl-D
+            ((char= c esc)
+             (when (eql (read-char *standard-input* nil :eof) #\[)
+               (case (read-char *standard-input* nil :eof)
+                 (#\C (when (< cur (tam)) (incf cur) (redesenha)))        ; →
+                 (#\D (when (> cur 0) (decf cur) (redesenha)))            ; ←
+                 (#\A (when (> nav 0)                                     ; ↑
+                        (decf nav) (trocar (aref *linhas* nav)) (redesenha)))
+                 (#\B (cond ((< nav (1- (fill-pointer *linhas*)))         ; ↓
+                             (incf nav) (trocar (aref *linhas* nav)) (redesenha))
+                            (t (setf nav (fill-pointer *linhas*)) (trocar "") (redesenha)))))))
+            ((>= (char-code c) 32) (inserir c) (redesenha))))))))
+
+;;; ===========================================================================
 ;;; Laço de leitura-avaliação-impressão (REPL)
 ;;; ===========================================================================
 
-(defun repl ()
-  "REPL simples em português, à prova de erros."
-  (loop
-    (format t "~a " (ciano "cerne>"))
-    (finish-output)
-    (let ((forma (handler-case (read *standard-input* nil :fim-do-arquivo)
-                   (error (e)
-                     (format t "~&Erro de leitura: ~a~%" e)
-                     :erro-leitura))))
-      (cond
-        ((eq forma :fim-do-arquivo)
-         (format t "~&Entrada encerrada.~%")
-         (return))
-        ((eq forma :erro-leitura)
-         (read-line *standard-input* nil nil))
-        (t
-         (push forma *historico*)
-         (handler-case
-             (let ((resultados (multiple-value-list (eval forma))))
-               (if resultados
-                   (dolist (r resultados) (format t "~&~a ~s~%" (amarelo "=>") r))
-                   (format t "~&; sem valor~%")))
-           (error (e)
-             (format t "~&~a ~a~%" (amarelo "Falha ao avaliar:") e))))))))
+(defun ler-uma-linha (cru prompt)
+  (if cru
+      (ler-linha-editada prompt)
+      (progn (format t "~a" prompt) (finish-output)
+             (read-line *standard-input* nil :eof))))
+
+(defun ler-forma (primeira cru)
+  "Lê uma forma Lisp completa, pedindo mais linhas se estiver incompleta.
+Retorna (values forma :ok) | (values nil :eof) | (values condição :erro)."
+  (let ((texto primeira))
+    (loop
+      (handler-case
+          (return (values (read-from-string texto) :ok))
+        (end-of-file ()
+          (let ((mais (ler-uma-linha cru "  ...> ")))
+            (when (eq mais :eof) (return (values nil :eof)))
+            (setf texto (concatenate 'string texto (string #\Newline) mais))))
+        (error (e) (return (values e :erro)))))))
+
+(defun repl (&optional (editar t))
+  "REPL em português, com edição de linha quando há terminal.
+EDITAR nil desliga o modo cru (usado quando se serve por rede)."
+  (let ((cru (and editar (ativar-modo-cru))))
+    (unwind-protect
+         (loop
+           (let ((linha (ler-uma-linha cru (format nil "~a " (ciano "cerne>")))))
+             (cond
+               ((eq linha :eof) (format t "~&Entrada encerrada.~%") (return))
+               ((string= (string-trim '(#\Space #\Tab) linha) "") nil)
+               (t
+                (when (and cru (plusp (length linha)))
+                  (vector-push-extend linha *linhas*))
+                (multiple-value-bind (forma estado) (ler-forma linha cru)
+                  (case estado
+                    (:eof (format t "~&Entrada encerrada.~%") (return))
+                    (:erro (format t "~&Erro de leitura: ~a~%" forma))
+                    (:ok
+                     (push forma *historico*)
+                     (handler-case
+                         (let ((resultados (multiple-value-list (eval forma))))
+                           (if resultados
+                               (dolist (r resultados) (format t "~&~a ~s~%" (amarelo "=>") r))
+                               (format t "~&; sem valor~%")))
+                       (error (e)
+                         (format t "~&~a ~a~%" (amarelo "Falha ao avaliar:") e))))))))))
+      (restaurar-modo))))
+
+;;; ===========================================================================
+;;; Rede: sobe a interface virtio-net e serve um REPL por telnet
+;;;
+;;; A rede do QEMU em modo "user" entrega o IP fixo 10.0.2.15 ao convidado.
+;;; Configuramos a interface na unha via ioctl (struct ifreq), sem ifconfig.
+;;; ===========================================================================
+
+(defparameter *ip-cerne* "10.0.2.15")
+(defparameter *mascara* "255.255.255.0")
+(defparameter *rede-pronta* nil)
+
+(defun ip->bytes (s)
+  "\"10.0.2.15\" -> (10 0 2 15)"
+  (let (acc (n 0))
+    (loop for c across s do
+      (if (char= c #\.) (progn (push n acc) (setf n 0))
+          (setf n (+ (* n 10) (- (char-code c) 48)))))
+    (push n acc)
+    (nreverse acc)))
+
+(defun nome-interface ()
+  "Primeira interface em /sys/class/net que não seja lo."
+  (handler-case
+      (let ((d (sb-posix:opendir "/sys/class/net")) (achado nil))
+        (unwind-protect
+             (loop for e = (sb-posix:readdir d)
+                   until (sb-alien:null-alien e)
+                   for n = (sb-posix:dirent-name e)
+                   unless (member n '("." ".." "lo") :test #'string=)
+                     do (setf achado n) (return))
+          (sb-posix:closedir d))
+        achado)
+    (error () nil)))
+
+(defmacro com-ifreq ((buf nome) &body corpo)
+  "Aloca uma struct ifreq (40 bytes) zerada com o nome da interface."
+  `(sb-alien:with-alien ((,buf (sb-alien:array sb-alien:unsigned-char 40)))
+     (dotimes (i 40) (setf (sb-alien:deref ,buf i) 0))
+     (loop for i below (min 15 (length ,nome))
+           do (setf (sb-alien:deref ,buf i) (char-code (char ,nome i))))
+     ,@corpo))
+
+(defun ioctl-buf (fd req buf)
+  (chamada-de-sistema 16 fd req (sb-sys:sap-int (sb-alien:alien-sap buf)) 0))
+
+(defun definir-endereco (fd nome req ip)
+  "SIOCSIFADDR / SIOCSIFNETMASK: grava um IP no campo sockaddr_in da ifreq."
+  (com-ifreq (buf nome)
+    (setf (sb-alien:deref buf 16) 2)          ; sin_family = AF_INET (little-endian)
+    (let ((b (ip->bytes ip)))
+      (loop for i below 4 do (setf (sb-alien:deref buf (+ 20 i)) (nth i b))))
+    (ioctl-buf fd req buf)))
+
+(defun subir-interface (fd nome)
+  "SIOCGIFFLAGS + SIOCSIFFLAGS: liga os bits IFF_UP|IFF_RUNNING."
+  (com-ifreq (buf nome)
+    (ioctl-buf fd #x8913 buf)                  ; pega flags
+    (let ((flags (logior (sb-alien:deref buf 16)
+                         (ash (sb-alien:deref buf 17) 8)
+                         1 64)))               ; IFF_UP | IFF_RUNNING
+      (setf (sb-alien:deref buf 16) (logand flags #xff)
+            (sb-alien:deref buf 17) (logand (ash flags -8) #xff)))
+    (ioctl-buf fd #x8914 buf)))                ; aplica flags
+
+(defun configurar-rede ()
+  "Carrega os módulos de rede e configura a interface com IP estático."
+  (when *rede-pronta* (return-from configurar-rede t))
+  (handler-case
+      (progn
+        (carregar-modulo "/lib/modules/failover.ko")
+        (carregar-modulo "/lib/modules/net_failover.ko")
+        (carregar-modulo "/lib/modules/virtio_net.ko")
+        (sleep 0.4)
+        (let ((nome (nome-interface)))
+          (unless nome (format t "~&Nenhuma interface de rede encontrada.~%")
+                  (return-from configurar-rede nil))
+          (let* ((sock (make-instance 'sb-bsd-sockets:inet-socket
+                                      :type :stream :protocol :tcp))
+                 (fd (sb-bsd-sockets:socket-file-descriptor sock)))
+            (unwind-protect
+                 (progn
+                   (definir-endereco fd nome #x8916 *ip-cerne*)   ; SIOCSIFADDR
+                   (definir-endereco fd nome #x891c *mascara*)    ; SIOCSIFNETMASK
+                   (subir-interface fd nome))
+              (sb-bsd-sockets:socket-close sock))
+            (setf *rede-pronta* t)
+            (format t "~&Interface ~a no ar: ~a~%" nome *ip-cerne*)
+            t)))
+    (error (e) (format t "~&Falha ao configurar rede: ~a~%" e) nil)))
+
+(defun rede ()
+  "Sobe a rede (se preciso) e mostra o status."
+  (configurar-rede)
+  (let ((nome (nome-interface)))
+    (if nome
+        (format t "~&Interface: ~a~%IP:        ~a~%Telnet:    (telnet 2323) e conecte do host~%"
+                nome *ip-cerne*)
+        (format t "~&Rede indisponível.~%")))
+  (values))
+
+(defun telnet (&optional (porta 2323))
+  "Serve um REPL do Cerne por TCP. Conecte do host: nc localhost <porta>."
+  (unless (configurar-rede)
+    (format t "~&Sem rede; telnet cancelado.~%")
+    (return-from telnet (values)))
+  (let ((srv (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp)))
+    (setf (sb-bsd-sockets:sockopt-reuse-address srv) t)
+    (handler-case
+        (progn
+          (sb-bsd-sockets:socket-bind srv #(0 0 0 0) porta)
+          (sb-bsd-sockets:socket-listen srv 1)
+          (format t "~&REPL servido em TCP ~a:~d. Ctrl-C aqui para parar.~%"
+                  *ip-cerne* porta)
+          (unwind-protect
+               (loop
+                 (let ((cli (sb-bsd-sockets:socket-accept srv)))
+                   (let ((s (sb-bsd-sockets:socket-make-stream
+                             cli :input t :output t :element-type 'character
+                                 :buffering :none)))
+                     (unwind-protect
+                          (let ((*standard-input* s) (*standard-output* s))
+                            (banner)
+                            (format s "~&(REPL remoto do Cerne — boa diversão)~%")
+                            (repl nil))   ; sem modo cru: a tty local não é a daqui
+                       (ignore-errors (close s))
+                       (ignore-errors (sb-bsd-sockets:socket-close cli))))))
+            (sb-bsd-sockets:socket-close srv)))
+      (sb-sys:interactive-interrupt ()
+        (ignore-errors (sb-bsd-sockets:socket-close srv))
+        (format t "~&Servidor encerrado.~%"))))
+  (values))
 
 ;;; ===========================================================================
 ;;; Ponto de entrada (chamado pelo kernel como /init)
