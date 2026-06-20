@@ -67,10 +67,14 @@ Para desligar: digite `(desligar)` no REPL, ou `Ctrl-A` seguido de `X`.
 Os scripts usam KVM automaticamente quando disponível e caem pra emulação
 (TCG, ~10s) quando não há.
 
-**Rede:** os scripts ligam uma interface virtio-net e encaminham a porta
-`2323` do host. Dentro do REPL, `(telnet)` serve um REPL completo por TCP —
-conecte de fora com `nc localhost 2323` e avalie Lisp na máquina remota
-(inclusive `(desligar)`).
+**Rede:** os scripts ligam uma interface virtio-net e encaminham as portas
+`2323` (telnet) e `8080` (HTTP) do host. Dentro do REPL:
+
+- `(telnet)` — serve um REPL por TCP: `nc localhost 2323` e avalie Lisp remoto.
+- `(servir 8080)` — **abre http://localhost:8080 no navegador** e avalie Lisp
+  numa página servida pelo próprio kernel.
+- `(http-get "http://example.com/")` — o kernel **baixa uma página da
+  internet** (configura rota e DNS na unha via `ioctl`).
 
 Alvos separados:
 
@@ -121,13 +125,17 @@ histórico, e backspace / Ctrl-A / Ctrl-E funcionam como você espera.
 
 **Rede**
 
-| Comando         | O que faz                                       |
-| --------------- | ----------------------------------------------- |
-| `(rede)`        | sobe a interface e mostra o IP                  |
-| `(telnet 2323)` | serve um REPL por TCP (`nc localhost 2323`)     |
+| Comando                       | O que faz                                  |
+| ----------------------------- | ------------------------------------------ |
+| `(rede)`                      | sobe a interface e mostra o IP             |
+| `(telnet 2323)`               | serve um REPL por TCP (`nc localhost 2323`)|
+| `(servir 8080)`               | serve um REPL pelo navegador (HTTP)        |
+| `(http-get "http://...")`     | baixa uma página da internet               |
 
 A interface virtio-net sobe na unha via `ioctl(SIOCSIFADDR…)` (struct
-`ifreq`), sem `ifconfig`. O REPL remoto avalia Lisp por um socket TCP.
+`ifreq`) e rota default via `SIOCADDRT`, sem `ifconfig` nem `ip`. O REPL
+remoto avalia Lisp por socket TCP; o servidor web serve uma página que
+faz `POST /eval` de volta pro kernel.
 
 **Lisp / meta**
 
@@ -153,11 +161,15 @@ A interface virtio-net sobe na unha via `ioctl(SIOCSIFADDR…)` (struct
 | `(salvar)`       | grava a loja direto nos bytes de `/dev/vda`    |
 | `(restaurar)`    | recarrega a loja do disco                      |
 | `(disco-bruto)`  | hexdump dos bytes crus de `/dev/vda`           |
+| `(autoexec "…")` | grava um `init.lisp` em `/dev/vdb`             |
 
 A loja é serializada como uma S-expressão e escrita **direto no bloco**
 `/dev/vda` — nada de ext4, FAT ou partição. No boot, o Cerne carrega o
 módulo `virtio_blk` via `finit_module(2)` e restaura a loja sozinho.
 Desligue, ligue de novo: ela continua lá.
+
+`(autoexec "…código…")` grava Lisp num segundo disco cru (`/dev/vdb`) que
+**roda automaticamente no próximo boot** — você programa o próprio núcleo.
 
 **Diversão**
 
@@ -169,6 +181,7 @@ Desligue, ligue de novo: ela continua lá.
 | `(plasma)`          | plasma colorido animado (cores 256)        |
 | `(fogo)`            | efeito de fogo ASCII animado               |
 | `(snake)`           | jogo da cobra (setas/WASD, q sai)          |
+| `(jogo-2048)`       | o 2048 (setas/WASD, q sai)                 |
 | `(cores)`           | paleta de cores ANSI do terminal           |
 | `(relogio 10)`      | relógio digital grande, ao vivo            |
 | `(arvore)`          | árvore fractal em ASCII                     |

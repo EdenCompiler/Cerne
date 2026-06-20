@@ -19,17 +19,17 @@
            ;; sistema de arquivos
            :arquivos :ver
            ;; rede
-           :rede :telnet
+           :rede :telnet :servir :http-get
            ;; loja chave-valor
            :lembrar :recordar :esquecer :tudo-que-lembro
            ;; persistência em disco cru
-           :salvar :restaurar :disco-bruto
+           :salvar :restaurar :disco-bruto :autoexec
            ;; meta / Lisp
            :quine :desmontar :macroexpandir
            ;; diversão
            :mandelbrot :adivinhe :vida :vaca :pi-digitos :historico
            :matrix :fortune :senha :cores :relogio :arvore :grafico
-           :fogo :plasma :snake))
+           :fogo :plasma :snake :jogo-2048))
 
 (in-package :cerne)
 
@@ -425,6 +425,47 @@ Não confia em FILE-LENGTH porque arquivos do /proc reportam tamanho 0."
                         do (write-char (if (<= 32 b 126) (code-char b) #\.)))
                   (write-char #\|))))))
     (error (e) (format t "~&Erro lendo o disco: ~a~%" e)))
+  (values))
+
+;;; ===========================================================================
+;;; Autoexec: um init.lisp guardado num segundo disco cru (/dev/vdb)
+;;; ===========================================================================
+
+(defparameter *disco-init* "/dev/vdb" "Bloco com o código de autoexec (init.lisp).")
+
+(defun carregar-init ()
+  "No boot, avalia o código Lisp gravado em /dev/vdb (se houver)."
+  (handler-case
+      (let ((txt (ler-arquivo *disco-init*)))
+        (when txt (setf txt (subseq txt 0 (or (position #\Nul txt) (length txt)))))
+        (when (and txt (plusp (length (string-trim '(#\Space #\Newline) txt))))
+          (format t "~&Executando init.lisp do disco...~%")
+          (with-input-from-string (s txt)
+            (loop
+              (let ((forma (handler-case (read s nil :fim) (error () :fim))))
+                (when (eq forma :fim) (return))
+                (handler-case (eval forma)
+                  (error (e) (format t "~&  init.lisp: ~a~%" e))))))))
+    (error () nil)))
+
+(defun autoexec (&optional codigo)
+  "Sem argumento, mostra o init.lisp atual. Com uma string, grava-o em /dev/vdb.
+O código roda automaticamente no próximo boot."
+  (if codigo
+      (handler-case
+          (progn
+            (with-open-file (f *disco-init* :direction :output
+                                            :if-exists :overwrite :if-does-not-exist :error)
+              (write-string codigo f)
+              (write-char #\Nul f))
+            (format t "~&init.lisp gravado (~d bytes). Roda no próximo boot.~%"
+                    (length codigo)))
+        (error (e) (format t "~&Não consegui gravar o init.lisp: ~a~%" e)))
+      (let ((txt (ler-arquivo *disco-init*)))
+        (if (and txt (plusp (length (string-trim '(#\Space #\Newline #\Nul) txt))))
+            (format t "~&init.lisp atual:~%~a~%"
+                    (subseq txt 0 (or (position #\Nul txt) (length txt))))
+            (format t "~&Nenhum init.lisp gravado (use (autoexec \"...código...\")).~%"))))
   (values))
 
 ;;; ===========================================================================
@@ -865,6 +906,84 @@ Prova que o Cerne compila Lisp pra instruções reais da CPU."
       (format t "~c[2J~c[HFim de jogo! Pontos: ~d~%" esc esc pontos)))
   (values))
 
+(defun jogo-2048 ()
+  "O jogo 2048. Setas ou WASD pra mover, 'q' sai. Junte os números até 2048."
+  (setf *random-state* (make-random-state t))
+  (let ((g (make-array '(4 4) :initial-element 0))
+        (esc (code-char 27)) (pontos 0) (vivo t))
+    (labels ((vazias ()
+               (let (acc) (dotimes (y 4) (dotimes (x 4)
+                                           (when (zerop (aref g y x)) (push (cons y x) acc)))) acc))
+             (nova-peca ()
+               (let ((vs (vazias)))
+                 (when vs
+                   (let ((c (nth (random (length vs)) vs)))
+                     (setf (aref g (car c) (cdr c)) (if (zerop (random 10)) 4 2))))))
+             (comprime (linha)              ; junta uma linha pra esquerda
+               (let ((nums (remove 0 linha)) (saida nil))
+                 (loop while nums do
+                   (if (and (cdr nums) (= (first nums) (second nums)))
+                       (progn (push (* 2 (first nums)) saida)
+                              (incf pontos (* 2 (first nums)))
+                              (setf nums (cddr nums)))
+                       (progn (push (first nums) saida) (setf nums (cdr nums)))))
+                 (let ((r (nreverse saida)))
+                   (append r (make-list (- 4 (length r)) :initial-element 0)))))
+             (linha (y) (loop for x below 4 collect (aref g y x)))
+             (set-linha (y l) (loop for x below 4 do (setf (aref g y x) (nth x l))))
+             (col (x) (loop for y below 4 collect (aref g y x)))
+             (set-col (x l) (loop for y below 4 do (setf (aref g y x) (nth y l))))
+             (mover (dir)
+               (let ((antes (loop for y below 4 append (linha y))))
+                 (case dir
+                   (:esq (dotimes (y 4) (set-linha y (comprime (linha y)))))
+                   (:dir (dotimes (y 4) (set-linha y (reverse (comprime (reverse (linha y)))))))
+                   (:cima (dotimes (x 4) (set-col x (comprime (col x)))))
+                   (:baixo (dotimes (x 4) (set-col x (reverse (comprime (reverse (col x))))))))
+                 (not (equal antes (loop for y below 4 append (linha y))))))
+             (cor-cel (v)
+               (case v ((0) "0") ((2) "37") ((4) "36") ((8) "32") ((16) "33")
+                     ((32) "35") ((64) "31") (t "1;33")))
+             (desenha ()
+               (format t "~c[H2048 — pontos: ~d   (setas/WASD, q sai)~%~%" esc pontos)
+               (dotimes (y 4)
+                 (dotimes (x 4)
+                   (let ((v (aref g y x)))
+                     (if (zerop v)
+                         (format t "   .  ")
+                         (format t "~c[~am~5d~c[0m " esc (cor-cel v) v esc))))
+                 (format t "~%~%"))
+               (finish-output))
+             (tem-movimento ()
+               (or (vazias)
+                   (loop for y below 4 thereis
+                     (loop for x below 3 thereis
+                       (or (= (aref g y x) (aref g y (1+ x)))
+                           (= (aref g x y) (aref g (1+ x) y))))))))
+      (nova-peca) (nova-peca)
+      (format t "~c[2J" esc) (desenha)
+      (loop while vivo do
+        (let ((c (read-char *standard-input* nil :eof)) (dir nil))
+          (cond
+            ((eq c :eof) (return))
+            ((char= c esc)
+             (when (eql (read-char *standard-input* nil nil) #\[)
+               (case (read-char *standard-input* nil nil)
+                 (#\A (setf dir :cima)) (#\B (setf dir :baixo))
+                 (#\C (setf dir :dir))  (#\D (setf dir :esq)))))
+            ((member c '(#\w #\W)) (setf dir :cima))
+            ((member c '(#\s #\S)) (setf dir :baixo))
+            ((member c '(#\d #\D)) (setf dir :dir))
+            ((member c '(#\a #\A)) (setf dir :esq))
+            ((member c '(#\q #\Q)) (return)))
+          (when dir
+            (when (mover dir) (nova-peca) (desenha))
+            (unless (tem-movimento)
+              (format t "~%Sem movimentos. Fim! Pontos: ~d~%" pontos)
+              (setf vivo nil)))))
+      (format t "~c[2J~c[HFim de 2048. Pontos: ~d~%" esc esc pontos)))
+  (values))
+
 ;;; ===========================================================================
 ;;; Ajuda
 ;;; ===========================================================================
@@ -884,17 +1003,17 @@ Prova que o Cerne compila Lisp pra instruções reais da CPU."
   Arquivos:~%~
     (arquivos \"/proc\") (ver \"/proc/cmdline\")~%~
   Rede:~%~
-    (rede) (telnet 2323)~%~
+    (rede) (telnet 2323) (servir 8080) (http-get \"http://exemplo.com\")~%~
   Lisp / meta:~%~
     (quine) (desmontar (quote fib)) (macroexpandir (quote (when a b)))~%~
   Memória chave-valor:~%~
     (lembrar chave valor) (recordar chave) (esquecer chave) (tudo-que-lembro)~%~
   Persistência em disco cru (/dev/vda, sem sistema de arquivos):~%~
-    (salvar) (restaurar) (disco-bruto)~%~
+    (salvar) (restaurar) (disco-bruto) (autoexec \"...código de boot...\")~%~
   Diversão:~%~
-    (mandelbrot) (vida) (matrix) (plasma) (fogo) (snake) (cores) (relogio 10)~%~
-    (arvore) (grafico (list 3 7 2 9 5)) (vaca \"texto\") (pi-digitos 80)~%~
-    (adivinhe) (fortune) (senha 16) (historico)~%~
+    (mandelbrot) (vida) (matrix) (plasma) (fogo) (snake) (jogo-2048) (cores)~%~
+    (relogio 10) (arvore) (grafico (list 3 7 2 9 5)) (vaca \"texto\")~%~
+    (pi-digitos 80) (adivinhe) (fortune) (senha 16) (historico)~%~
 ~%  Dica: setas ←→ movem, ↑↓ navegam o histórico de comandos.~%~
 ~%  Fora isso, é Common Lisp puro: (+ 1 2 3), (loop for i below 5 collect (* i i))~%"
           (negrito "Comandos do Cerne (tudo é Lisp — chame como função):")))
@@ -1051,6 +1170,8 @@ EDITAR nil desliga o modo cru (usado quando se serve por rede)."
 
 (defparameter *ip-cerne* "10.0.2.15")
 (defparameter *mascara* "255.255.255.0")
+(defparameter *gateway* "10.0.2.2")
+(defparameter *dns* "10.0.2.3")
 (defparameter *rede-pronta* nil)
 
 (defun ip->bytes (s)
@@ -1106,6 +1227,27 @@ EDITAR nil desliga o modo cru (usado quando se serve por rede)."
             (sb-alien:deref buf 17) (logand (ash flags -8) #xff)))
     (ioctl-buf fd #x8914 buf)))                ; aplica flags
 
+(defun adicionar-rota-padrao (fd gateway)
+  "SIOCADDRT: rota default (0.0.0.0/0) via GATEWAY, para sair pra internet."
+  (sb-alien:with-alien ((buf (sb-alien:array sb-alien:unsigned-char 128)))
+    (dotimes (i 128) (setf (sb-alien:deref buf i) 0))
+    (setf (sb-alien:deref buf 8) 2)            ; rt_dst.sin_family = AF_INET (0.0.0.0)
+    (setf (sb-alien:deref buf 24) 2)           ; rt_gateway.sin_family = AF_INET
+    (let ((g (ip->bytes gateway)))
+      (loop for i below 4 do (setf (sb-alien:deref buf (+ 28 i)) (nth i g))))
+    (setf (sb-alien:deref buf 40) 2)           ; rt_genmask.sin_family (máscara 0.0.0.0)
+    (setf (sb-alien:deref buf 56) 3)           ; rt_flags = RTF_UP | RTF_GATEWAY
+    (chamada-de-sistema 16 fd #x890b
+                        (sb-sys:sap-int (sb-alien:alien-sap buf)) 0)))
+
+(defun escrever-resolv ()
+  "Cria /etc/resolv.conf apontando pro DNS do QEMU, pra resolver nomes."
+  (ignore-errors
+    (ensure-directories-exist "/etc/")
+    (with-open-file (f "/etc/resolv.conf" :direction :output
+                                          :if-exists :supersede :if-does-not-exist :create)
+      (format f "nameserver ~a~%" *dns*))))
+
 (defun configurar-rede ()
   "Carrega os módulos de rede e configura a interface com IP estático."
   (when *rede-pronta* (return-from configurar-rede t))
@@ -1125,10 +1267,12 @@ EDITAR nil desliga o modo cru (usado quando se serve por rede)."
                  (progn
                    (definir-endereco fd nome #x8916 *ip-cerne*)   ; SIOCSIFADDR
                    (definir-endereco fd nome #x891c *mascara*)    ; SIOCSIFNETMASK
-                   (subir-interface fd nome))
+                   (subir-interface fd nome)
+                   (ignore-errors (adicionar-rota-padrao fd *gateway*)))
               (sb-bsd-sockets:socket-close sock))
+            (escrever-resolv)
             (setf *rede-pronta* t)
-            (format t "~&Interface ~a no ar: ~a~%" nome *ip-cerne*)
+            (format t "~&Interface ~a no ar: ~a (gw ~a)~%" nome *ip-cerne* *gateway*)
             t)))
     (error (e) (format t "~&Falha ao configurar rede: ~a~%" e) nil)))
 
@@ -1175,6 +1319,159 @@ EDITAR nil desliga o modo cru (usado quando se serve por rede)."
   (values))
 
 ;;; ===========================================================================
+;;; Servidor HTTP + REPL pelo navegador
+;;; ===========================================================================
+
+(defparameter +crlf+ (coerce (list #\Return #\Newline) 'string))
+
+(defparameter *pagina-web*
+  (concatenate 'string
+   "<!doctype html><html lang=pt-br><head><meta charset=utf-8>"
+   "<title>Cerne — REPL</title><style>"
+   "body{background:#11141c;color:#cdd6f4;font-family:monospace;max-width:46em;margin:2em auto;padding:0 1em}"
+   "h1{color:#a6e3a1}textarea{width:100%;height:6em;background:#1e2030;color:#cdd6f4;border:1px solid #444;padding:.5em;font-family:monospace}"
+   "button{background:#a6e3a1;border:0;padding:.5em 1em;margin-top:.5em;cursor:pointer;font-weight:bold}"
+   "pre{background:#1e2030;padding:1em;white-space:pre-wrap;min-height:3em}</style></head><body>"
+   "<h1>&#127795; Cerne</h1><p>Um n&uacute;cleo Lisp respondendo do bare-metal. Avalie Common Lisp:</p>"
+   "<textarea id=c>(loop for i below 8 collect (* i i))</textarea><br>"
+   "<button onclick=run()>Avaliar</button><pre id=o>=&gt;</pre>"
+   "<script>async function run(){let r=await fetch('/eval',{method:'POST',"
+   "body:'codigo='+encodeURIComponent(document.getElementById('c').value)});"
+   "document.getElementById('o').textContent=await r.text()}</script>"
+   "</body></html>"))
+
+(defun url-decode (s)
+  "Decodifica %XX e + de um valor de formulário."
+  (with-output-to-string (o)
+    (let ((i 0) (n (length s)))
+      (loop while (< i n) do
+        (let ((c (char s i)))
+          (cond
+            ((char= c #\+) (write-char #\Space o) (incf i))
+            ((and (char= c #\%) (< (+ i 2) n))
+             (write-char (code-char (parse-integer s :start (1+ i) :end (+ i 3) :radix 16)) o)
+             (incf i 3))
+            (t (write-char c o) (incf i))))))))
+
+(defun campo-form (corpo nome)
+  "Extrai o valor de NOME de um corpo application/x-www-form-urlencoded."
+  (when corpo
+    (let* ((pref (concatenate 'string nome "="))
+           (p (search pref corpo)))
+      (when p
+        (let* ((ini (+ p (length pref)))
+               (fim (or (position #\& corpo :start ini) (length corpo))))
+          (subseq corpo ini fim))))))
+
+(defun avaliar-string (codigo)
+  "Lê e avalia CODIGO; devolve a saída impressa + os valores, como string."
+  (handler-case
+      (let* ((forma (let ((*read-eval* nil)) (read-from-string codigo)))
+             (saida (make-string-output-stream))
+             (cores* nil))
+        (let ((*cores* cores*) (*standard-output* saida))
+          (let ((vals (multiple-value-list (eval forma))))
+            (format saida "~{=> ~s~^~%~}" vals)))
+        (get-output-stream-string saida))
+    (error (e) (format nil "Erro: ~a" e))))
+
+(defun ler-requisicao (s)
+  "Lê uma requisição HTTP simples. Retorna (values método caminho corpo)."
+  (let ((linha (read-line s nil "")))
+    (let* ((p1 (position #\Space linha))
+           (p2 (and p1 (position #\Space linha :start (1+ p1))))
+           (metodo (and p1 (subseq linha 0 p1)))
+           (caminho (and p1 p2 (subseq linha (1+ p1) p2)))
+           (clen 0))
+      (loop for h = (string-right-trim '(#\Return) (read-line s nil ""))
+            until (string= h "")
+            do (let ((hl (string-downcase h)))
+                 (when (and (>= (length hl) 16)
+                            (string= "content-length: " (subseq hl 0 16)))
+                   (setf clen (or (parse-integer hl :start 16 :junk-allowed t) 0)))))
+      (let ((corpo (when (plusp clen)
+                     (let ((buf (make-string clen)))
+                       (read-sequence buf s) buf))))
+        (values metodo caminho corpo)))))
+
+(defun responder (s status tipo corpo)
+  (let ((bytes (sb-ext:string-to-octets corpo :external-format :utf-8)))
+    (format s "HTTP/1.1 ~a~aContent-Type: ~a; charset=utf-8~aContent-Length: ~d~aConnection: close~a~a"
+            status +crlf+ tipo +crlf+ (length bytes) +crlf+ +crlf+ corpo)
+    (finish-output s)))
+
+(defun servir (&optional (porta 8080))
+  "Serve um REPL pelo navegador. Abra http://localhost:8080 no host."
+  (unless (configurar-rede)
+    (format t "~&Sem rede; servidor cancelado.~%") (return-from servir (values)))
+  (let ((srv (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp)))
+    (setf (sb-bsd-sockets:sockopt-reuse-address srv) t)
+    (handler-case
+        (progn
+          (sb-bsd-sockets:socket-bind srv #(0 0 0 0) porta)
+          (sb-bsd-sockets:socket-listen srv 4)
+          (format t "~&Servidor HTTP no ar: http://localhost:~d  (Ctrl-C para parar)~%" porta)
+          (unwind-protect
+               (loop
+                 (let ((cli (sb-bsd-sockets:socket-accept srv)))
+                   (handler-case
+                       (let ((s (sb-bsd-sockets:socket-make-stream
+                                 cli :input t :output t :element-type 'character :buffering :full)))
+                         (multiple-value-bind (metodo caminho corpo) (ler-requisicao s)
+                           (declare (ignore metodo))
+                           (if (and caminho (string= caminho "/eval"))
+                               (responder s "200 OK" "text/plain"
+                                          (avaliar-string (url-decode (or (campo-form corpo "codigo") ""))))
+                               (responder s "200 OK" "text/html" *pagina-web*)))
+                         (ignore-errors (close s)))
+                     (error () nil))
+                   (ignore-errors (sb-bsd-sockets:socket-close cli))))
+            (sb-bsd-sockets:socket-close srv)))
+      (sb-sys:interactive-interrupt ()
+        (ignore-errors (sb-bsd-sockets:socket-close srv))
+        (format t "~&Servidor encerrado.~%"))))
+  (values))
+
+;;; ===========================================================================
+;;; Cliente HTTP (saída pra internet)
+;;; ===========================================================================
+
+(defun parse-url (url)
+  "http://host[:porta]/caminho -> (values host porta caminho)."
+  (let* ((u (if (and (>= (length url) 7) (string-equal "http://" (subseq url 0 7)))
+                (subseq url 7) url))
+         (barra (position #\/ u))
+         (autoridade (if barra (subseq u 0 barra) u))
+         (caminho (if barra (subseq u barra) "/"))
+         (doispontos (position #\: autoridade)))
+    (values (if doispontos (subseq autoridade 0 doispontos) autoridade)
+            (if doispontos (parse-integer autoridade :start (1+ doispontos)) 80)
+            caminho)))
+
+(defun http-get (url)
+  "Baixa URL por HTTP e imprime a resposta. Precisa de internet no host."
+  (configurar-rede)
+  (handler-case
+      (multiple-value-bind (host porta caminho) (parse-url url)
+        (let* ((ip (sb-bsd-sockets:host-ent-address
+                    (sb-bsd-sockets:get-host-by-name host)))
+               (sock (make-instance 'sb-bsd-sockets:inet-socket
+                                    :type :stream :protocol :tcp)))
+          (unwind-protect
+               (progn
+                 (sb-bsd-sockets:socket-connect sock ip porta)
+                 (let ((s (sb-bsd-sockets:socket-make-stream
+                           sock :input t :output t :element-type 'character :buffering :full)))
+                   (format s "GET ~a HTTP/1.0~aHost: ~a~aConnection: close~a~a"
+                           caminho +crlf+ host +crlf+ +crlf+ +crlf+)
+                   (finish-output s)
+                   (loop for linha = (read-line s nil nil)
+                         while linha do (write-line linha))))
+            (ignore-errors (sb-bsd-sockets:socket-close sock)))))
+    (error (e) (format t "~&Falha no http-get: ~a~%" e)))
+  (values))
+
+;;; ===========================================================================
 ;;; Ponto de entrada (chamado pelo kernel como /init)
 ;;; ===========================================================================
 
@@ -1187,6 +1484,7 @@ EDITAR nil desliga o modo cru (usado quando se serve por rede)."
   (carregar-modulo "/lib/modules/virtio_blk.ko")  ; faz aparecer /dev/vda
   (esperar-disco)                          ; aguarda só o necessário pelo node
   (restaurar t)                            ; recarrega a loja do disco, se houver
+  (carregar-init)                          ; roda o init.lisp do /dev/vdb, se houver
   (handler-case
       (progn
         (banner)
